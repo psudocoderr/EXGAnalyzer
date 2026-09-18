@@ -15,7 +15,7 @@ version's firmware and scripts. Older versions are reachable via their tags
 
 | Path | Contents |
 |------|----------|
-| `firmware/BioSignal-Recorder-v8/` | Current sketch: dual-channel ESP32 (GPIO33/32) at 250 Hz over serial, one `synapse.h` filter per channel. |
+| `firmware/BioSignal-Recorder-v9/` | Current sketch: three-channel ESP32 (GPIO33/35/34) at 250 Hz over serial, one `synapse.h` filter per channel. |
 | `recorder/` | Python tools for the current version: `recorder.py` (capture to CSV), `analyzer.py` (offline filtering + FFT), `Live_EEG_viewer*.py`. |
 | `data/` | Recorded sessions (gitignored, local only). See [data/README.md](data/README.md). |
 | `docs/` | BioAmp EXG Pill datasheet, notes, third-party licenses. |
@@ -36,17 +36,17 @@ version's firmware and scripts. Older versions are reachable via their tags
 
 ## Quick start
 
-1. Flash `firmware/BioSignal-Recorder-v8/BioSignal-Recorder-v8.ino` to an ESP32
+1. Flash `firmware/BioSignal-Recorder-v9/BioSignal-Recorder-v9.ino` to an ESP32
    (Arduino IDE / arduino-cli).
 2. Install Python dependencies:
    ```bash
    python -m venv .venv && source .venv/bin/activate
    pip install -r requirements.txt
    ```
-3. Record and analyse (sessions land in `data/v8/`):
+3. Record and analyse (sessions land in `data/v9/`):
    ```bash
    python recorder/recorder.py --port /dev/ttyUSB0 --duration 30
-   python recorder/analyzer.py --csv data/v8/eeg_session_<timestamp>.csv
+   python recorder/analyzer.py --csv data/v9/eeg_session_<timestamp>.csv
    ```
 
 ## Example results

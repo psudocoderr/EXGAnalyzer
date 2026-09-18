@@ -15,8 +15,8 @@ COM_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 115200
 
 # Kept generic -- the firmware pin assignment is the single source of truth
-# (see EEG_PIN_CH1/EEG_PIN_CH2 in the .ino) and can change independently.
-CHANNEL_LABELS = ('Ch1', 'Ch2')
+# (see EEG_PIN_CH1/EEG_PIN_CH2/EEG_PIN_CH3 in the .ino) and can change independently.
+CHANNEL_LABELS = ('Ch1', 'Ch2', 'Ch3')
 
 # Only used to size buffers up front -- the firmware's delayMicroseconds(4000)
 # loop doesn't guarantee exactly 250 Hz, so the real fs is measured each
@@ -73,13 +73,14 @@ SPEC_HISTORY_COLS = max(2, int(round(SPEC_HISTORY_SEC / (ANIM_INTERVAL_MS / 1000
 spec_history = [
     np.zeros((len(SPEC_FREQS), SPEC_HISTORY_COLS)),
     np.zeros((len(SPEC_FREQS), SPEC_HISTORY_COLS)),
+    np.zeros((len(SPEC_FREQS), SPEC_HISTORY_COLS)),
 ]
 
 # ============================================================
 # Initialize Ring Buffer
 # ============================================================
 
-# Each entry is (arrival_timestamp, ch1_adc_value, ch2_adc_value)
+# Each entry is (arrival_timestamp, ch1_adc_value, ch2_adc_value, ch3_adc_value)
 raw_buffer = deque(maxlen=MAX_SAMPLES)
 
 # Filters are (re)designed inside update() against the measured fs each
@@ -122,12 +123,12 @@ def serial_worker():
 
             parts = line.split(",")
 
-            if len(parts) < 2:
+            if len(parts) < 3:
                 print(f"Ignoring invalid data: {line}")
                 continue
 
-            # Store both channel values with their shared arrival time
-            raw_buffer.append((time.time(), float(parts[0]), float(parts[1])))
+            # Store all channel values with their shared arrival time
+            raw_buffer.append((time.time(), float(parts[0]), float(parts[1]), float(parts[2])))
 
         except ValueError:
 
@@ -155,17 +156,17 @@ thread.start()
 
 fig, axes = plt.subplots(
     3,
-    2,
-    figsize=(18, 10)
+    3,
+    figsize=(24, 10)
 )
 
 fig.canvas.manager.set_window_title(
-    "Real-Time EEG Analyzer (2 Channels)"
+    "Real-Time EEG Analyzer (3 Channels)"
 )
 
-raw_axes = (axes[0, 0], axes[0, 1])
-fft_axes = (axes[1, 0], axes[1, 1])
-spec_axes = (axes[2, 0], axes[2, 1])
+raw_axes = (axes[0, 0], axes[0, 1], axes[0, 2])
+fft_axes = (axes[1, 0], axes[1, 1], axes[1, 2])
+spec_axes = (axes[2, 0], axes[2, 1], axes[2, 2])
 
 # ============================================================
 # Row 1 - Raw EEG
@@ -303,15 +304,19 @@ def update(frame):
     buffered = list(raw_buffer)
 
     timestamps = np.array(
-        [t for t, _, _ in buffered]
+        [t for t, _, _, _ in buffered]
     )
 
     ch1_arr = np.array(
-        [c1 for _, c1, _ in buffered]
+        [c1 for _, c1, _, _ in buffered]
     )
 
     ch2_arr = np.array(
-        [c2 for _, _, c2 in buffered]
+        [c2 for _, _, c2, _ in buffered]
+    )
+
+    ch3_arr = np.array(
+        [c3 for _, _, _, c3 in buffered]
     )
 
     fs = estimate_fs(timestamps)
@@ -325,7 +330,7 @@ def update(frame):
     # --------------------------------------------------------
 
     for idx, (raw_arr, raw_ax, fft_ax, spec_ax, r_line, f_line, s_image) in enumerate(zip(
-        (ch1_arr, ch2_arr),
+        (ch1_arr, ch2_arr, ch3_arr),
         raw_axes,
         fft_axes,
         spec_axes,

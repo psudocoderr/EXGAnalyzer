@@ -16,13 +16,13 @@ WINDOW_SEC = 5.0         # Rolling history window for the raw/FFT view
 MAX_SAMPLES = int(NOMINAL_FS * WINDOW_SEC)
 
 # Kept generic -- the firmware pin assignment is the single source of truth
-# (see EEG_PIN_CH1/EEG_PIN_CH2 in the .ino) and can change independently.
-CHANNEL_LABELS = ('Ch1', 'Ch2')
+# (see EEG_PIN_CH1/EEG_PIN_CH2/EEG_PIN_CH3 in the .ino) and can change independently.
+CHANNEL_LABELS = ('Ch1', 'Ch2', 'Ch3')
 
 # --- Initialize Global Ring Buffer ---
 # deque automatically pushes old data out when MAX_SAMPLES is reached.
-# Each entry is (arrival_timestamp, ch1_adc_value, ch2_adc_value) so the
-# real sampling rate can be measured instead of assumed.
+# Each entry is (arrival_timestamp, ch1_adc_value, ch2_adc_value, ch3_adc_value)
+# so the real sampling rate can be measured instead of assumed.
 raw_buffer = deque(maxlen=MAX_SAMPLES)
 
 
@@ -61,12 +61,12 @@ def serial_worker():
             print(line)
 
             parts = line.split(",")
-            if len(parts) < 2:
+            if len(parts) < 3:
                 print(f"Ignoring invalid data: {line}")
                 continue
 
-            # Store both channel values with their shared arrival time
-            raw_buffer.append((time.time(), float(parts[0]), float(parts[1])))
+            # Store all channel values with their shared arrival time
+            raw_buffer.append((time.time(), float(parts[0]), float(parts[1]), float(parts[2])))
 
         except ValueError:
             # Ignore anything that isn't numeric
@@ -80,12 +80,12 @@ thread = threading.Thread(target=serial_worker, daemon=True)
 thread.start()
 
 # --- Matplotlib GUI Setup ---
-fig, axes = plt.subplots(2, 2, figsize=(14, 7))
-(ax1_raw, ax2_raw), (ax1_fft, ax2_fft) = axes
-fig.canvas.manager.set_window_title("Real-Time EEG Analyzer (2 Channels)")
+fig, axes = plt.subplots(2, 3, figsize=(18, 7))
+(ax1_raw, ax2_raw, ax3_raw), (ax1_fft, ax2_fft, ax3_fft) = axes
+fig.canvas.manager.set_window_title("Real-Time EEG Analyzer (3 Channels)")
 
-raw_axes = (ax1_raw, ax2_raw)
-fft_axes = (ax1_fft, ax2_fft)
+raw_axes = (ax1_raw, ax2_raw, ax3_raw)
+fft_axes = (ax1_fft, ax2_fft, ax3_fft)
 line_raw = []
 line_fft = []
 
@@ -143,14 +143,15 @@ def update(frame):
 
     # 1. Split buffer into timestamps/channel values, measure the real fs
     buffered = list(raw_buffer)
-    timestamps = np.array([t for t, _, _ in buffered])
-    ch1_arr = np.array([c1 for _, c1, _ in buffered])
-    ch2_arr = np.array([c2 for _, _, c2 in buffered])
+    timestamps = np.array([t for t, _, _, _ in buffered])
+    ch1_arr = np.array([c1 for _, c1, _, _ in buffered])
+    ch2_arr = np.array([c2 for _, _, c2, _ in buffered])
+    ch3_arr = np.array([c3 for _, _, _, c3 in buffered])
     fs = estimate_fs(timestamps)
     time_axis = timestamps - timestamps[0]
 
     for ch_arr, raw_ax, fft_ax, r_line, f_line in zip(
-        (ch1_arr, ch2_arr), raw_axes, fft_axes, line_raw, line_fft
+        (ch1_arr, ch2_arr, ch3_arr), raw_axes, fft_axes, line_raw, line_fft
     ):
         # 2-3. Convert to Volts, remove DC, filter (bandstop -> bandpass),
         #      designed against the actually measured fs

@@ -2,8 +2,8 @@
 """
 analyzer.py
 
-Replays a two-channel CSV recorded by recorder.py and runs the filtering
-+ FFT analysis on both channels post hoc -- no hardware or live
+Replays a three-channel CSV recorded by recorder.py and runs the filtering
++ FFT analysis on all channels post hoc -- no hardware or live
 connection needed.
 
 Usage:
@@ -31,23 +31,25 @@ ADC_MAX_COUNTS = 4095.0
 ADC_REF_VOLTAGE = 3.3
 
 # Kept generic -- the firmware pin assignment is the single source of truth
-# (see EEG_PIN_CH1/EEG_PIN_CH2 in the .ino) and can change independently.
-CHANNEL_LABELS = ("Ch1", "Ch2")
+# (see EEG_PIN_CH1/EEG_PIN_CH2/EEG_PIN_CH3 in the .ino) and can change independently.
+CHANNEL_LABELS = ("Ch1", "Ch2", "Ch3")
 
 
-def load_csv(csv_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_csv(csv_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     elapsed_s: list[float] = []
     ch1_raw: list[float] = []
     ch2_raw: list[float] = []
+    ch3_raw: list[float] = []
     with open(csv_path, newline="") as f:
         reader = csv.reader(f)
         next(reader, None)  # header
         for row in reader:
-            if len(row) < 3:
+            if len(row) < 4:
                 continue
             elapsed_s.append(float(row[0]))
             ch1_raw.append(float(row[1]))
             ch2_raw.append(float(row[2]))
+            ch3_raw.append(float(row[3]))
 
     if len(ch1_raw) < 32:
         print(f"[Error] Only {len(ch1_raw)} samples in {csv_path} -- need at least 32 to filter.")
@@ -57,6 +59,7 @@ def load_csv(csv_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         np.array(elapsed_s, dtype=np.float64),
         np.array(ch1_raw, dtype=np.float64),
         np.array(ch2_raw, dtype=np.float64),
+        np.array(ch3_raw, dtype=np.float64),
     )
 
 
@@ -122,18 +125,20 @@ def plot_channel(fig, axes_col, elapsed_s: np.ndarray, filtered: np.ndarray, fs:
 
 
 def analyze(csv_path: Path, output_path: Path) -> None:
-    elapsed_s, ch1_raw, ch2_raw = load_csv(csv_path)
+    elapsed_s, ch1_raw, ch2_raw, ch3_raw = load_csv(csv_path)
     fs = estimate_fs(elapsed_s)
     print(f"Loaded {len(ch1_raw)} samples from {csv_path}, estimated fs = {fs:.2f} Hz")
 
     ch1_filtered = filter_signal(ch1_raw, fs)
     ch2_filtered = filter_signal(ch2_raw, fs)
+    ch3_filtered = filter_signal(ch3_raw, fs)
 
-    fig, axes = plt.subplots(3, 2, figsize=(18, 10))
-    fig.canvas.manager.set_window_title("EEG Post-Collection Analysis (2 Channels)")
+    fig, axes = plt.subplots(3, 3, figsize=(24, 10))
+    fig.canvas.manager.set_window_title("EEG Post-Collection Analysis (3 Channels)")
 
     plot_channel(fig, axes[:, 0], elapsed_s, ch1_filtered, fs, CHANNEL_LABELS[0])
     plot_channel(fig, axes[:, 1], elapsed_s, ch2_filtered, fs, CHANNEL_LABELS[1])
+    plot_channel(fig, axes[:, 2], elapsed_s, ch3_filtered, fs, CHANNEL_LABELS[2])
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -142,7 +147,7 @@ def analyze(csv_path: Path, output_path: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Replay a recorder.py CSV and analyze both channels")
+    parser = argparse.ArgumentParser(description="Replay a recorder.py CSV and analyze all channels")
     parser.add_argument("--csv", type=Path, required=True, help="CSV file written by recorder.py")
     parser.add_argument("--output", type=Path, default=None,
                          help="Path to save the analysis plot PNG (default: <csv name>.png)")
