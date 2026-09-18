@@ -1,0 +1,20 @@
+# Recorded session data (personal/subject data, not source) -- see data/README.md
+/data/*
+!/data/README.md
+
+# Scratch output / drafts
+recorder/quick_filter_check*.png
+README2.MD
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE / editor config
+.theia/
+.vscode/
+
+# OS
+.DS_Store
