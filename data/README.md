@@ -8,11 +8,13 @@ this README is gitignored: recordings are personal/subject data, not source.
 | Path | Written by | Contents |
 |------|------------|----------|
 | `data/EEG_Dataset/<Subject>/<Date>/<Task>/` | v2/v3 recorders (`eegrecorder-*.py`, `bridge/`) | Raw CSV runs + metadata. These scripts use `./EEG_Dataset` relative to the working directory, so run them from `data/`. |
-| `data/v7/`, `data/v7.5/` | `recorder/recorder.py` | `eeg_session_<YYYYMMDD_HHMMSS>.csv` (+ `.png` from `analyzer.py`) |
+| `data/v7/`, `data/v7.5/`, `data/v8/`, `data/v9/` | `recorder/recorder.py` | `eeg_session_<YYYYMMDD_HHMMSS>.csv` (+ `.png` from `analyzer.py`) |
 
 Subfolders under a version (per subject, per test, per day) are free-form.
 
-## CSV format (v7, v7.5)
+## CSV format
+
+v7, v7.5 (single channel):
 
 ```
 elapsed_s,value
@@ -20,3 +22,5 @@ elapsed_s,value
 ```
 
 `elapsed_s` is seconds since the recording started, `value` is the raw 12-bit ADC reading (0-4095).
+
+v8: `elapsed_s,ch1,ch2`. v9: `elapsed_s,ch1,ch2,ch3`. Same units, one raw ADC column per channel.

@@ -2,8 +2,9 @@
 """
 analyzer.py
 
-Replays a CSV recorded by recorder.py and runs the filtering + FFT
-analysis on it post hoc -- no hardware or live connection needed.
+Replays a two-channel CSV recorded by recorder.py and runs the filtering
++ FFT analysis on both channels post hoc -- no hardware or live
+connection needed.
 
 Usage:
     python analyzer.py --csv eeg_session_20260908_143012.csv
@@ -29,24 +30,34 @@ BANDPASS_HIGH_HZ = 45.0
 ADC_MAX_COUNTS = 4095.0
 ADC_REF_VOLTAGE = 3.3
 
+# Kept generic -- the firmware pin assignment is the single source of truth
+# (see EEG_PIN_CH1/EEG_PIN_CH2 in the .ino) and can change independently.
+CHANNEL_LABELS = ("Ch1", "Ch2")
 
-def load_csv(csv_path: Path) -> tuple[np.ndarray, np.ndarray]:
+
+def load_csv(csv_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     elapsed_s: list[float] = []
-    raw_value: list[float] = []
+    ch1_raw: list[float] = []
+    ch2_raw: list[float] = []
     with open(csv_path, newline="") as f:
         reader = csv.reader(f)
         next(reader, None)  # header
         for row in reader:
-            if len(row) < 2:
+            if len(row) < 3:
                 continue
             elapsed_s.append(float(row[0]))
-            raw_value.append(float(row[1]))
+            ch1_raw.append(float(row[1]))
+            ch2_raw.append(float(row[2]))
 
-    if len(raw_value) < 32:
-        print(f"[Error] Only {len(raw_value)} samples in {csv_path} -- need at least 32 to filter.")
+    if len(ch1_raw) < 32:
+        print(f"[Error] Only {len(ch1_raw)} samples in {csv_path} -- need at least 32 to filter.")
         sys.exit(1)
 
-    return np.array(elapsed_s, dtype=np.float64), np.array(raw_value, dtype=np.float64)
+    return (
+        np.array(elapsed_s, dtype=np.float64),
+        np.array(ch1_raw, dtype=np.float64),
+        np.array(ch2_raw, dtype=np.float64),
+    )
 
 
 def estimate_fs(elapsed_s: np.ndarray) -> float:
@@ -65,33 +76,26 @@ def filter_signal(raw: np.ndarray, fs: float) -> np.ndarray:
     return filtfilt(b_bp, a_bp, notched)
 
 
-def analyze(csv_path: Path, output_path: Path) -> None:
-    elapsed_s, raw = load_csv(csv_path)
-    fs = estimate_fs(elapsed_s)
-    print(f"Loaded {len(raw)} samples from {csv_path}, estimated fs = {fs:.2f} Hz")
+def plot_channel(fig, axes_col, elapsed_s: np.ndarray, filtered: np.ndarray, fs: float, label: str) -> None:
+    ax_time, ax_fft, ax_spec = axes_col
 
-    filtered = filter_signal(raw, fs)
+    ax_time.plot(elapsed_s, filtered, color="#1f2937", linewidth=0.8)
+    ax_time.set_title(f"{label} -- Filtered Time Domain (DC Centered)")
+    ax_time.set_xlabel("Time (Seconds)")
+    ax_time.set_ylabel("Volts (V)")
+    ax_time.grid(True, alpha=0.3)
 
     n = len(filtered)
     freqs = np.fft.rfftfreq(n, d=1.0 / fs)
     fft_mag = np.abs(np.fft.rfft(filtered)) / n
 
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
-    fig.canvas.manager.set_window_title("EEG Post-Collection Analysis")
-
-    ax1.plot(elapsed_s, filtered, color="#1f2937", linewidth=0.8)
-    ax1.set_title("Filtered Time Domain (DC Centered)")
-    ax1.set_xlabel("Time (Seconds)")
-    ax1.set_ylabel("Volts (V)")
-    ax1.grid(True, alpha=0.3)
-
     mask = freqs <= 60.0
-    ax2.plot(freqs[mask], fft_mag[mask], color="#3b82f6", linewidth=1.2)
-    ax2.set_title(f"Filtered FFT ({BANDPASS_LOW_HZ:.1f}-{BANDPASS_HIGH_HZ:.0f} Hz Bandpass + "
-                  f"{BANDSTOP_LOW_HZ:.0f}-{BANDSTOP_HIGH_HZ:.0f} Hz Bandstop)")
-    ax2.set_xlabel("Frequency (Hz)")
-    ax2.set_ylabel("Magnitude (V)")
-    ax2.grid(True, alpha=0.3)
+    ax_fft.plot(freqs[mask], fft_mag[mask], color="#3b82f6", linewidth=1.2)
+    ax_fft.set_title(f"{label} -- Filtered FFT ({BANDPASS_LOW_HZ:.1f}-{BANDPASS_HIGH_HZ:.0f} Hz Bandpass + "
+                      f"{BANDSTOP_LOW_HZ:.0f}-{BANDSTOP_HIGH_HZ:.0f} Hz Bandstop)")
+    ax_fft.set_xlabel("Frequency (Hz)")
+    ax_fft.set_ylabel("Magnitude (V)")
+    ax_fft.grid(True, alpha=0.3)
 
     bands = [
         (0.5, 4, "red", "Delta"),
@@ -100,9 +104,9 @@ def analyze(csv_path: Path, output_path: Path) -> None:
         (13, 30, "blue", "Beta"),
         (30, 45, "purple", "Gamma"),
     ]
-    for lo, hi, color, label in bands:
-        ax2.axvspan(lo, hi, color=color, alpha=0.08, label=label)
-    ax2.legend(loc="upper right")
+    for lo, hi, color, band_label in bands:
+        ax_fft.axvspan(lo, hi, color=color, alpha=0.08, label=band_label)
+    ax_fft.legend(loc="upper right", fontsize=8)
 
     nperseg = min(n, max(32, int(fs * 2)))
     noverlap = nperseg // 2
@@ -110,11 +114,26 @@ def analyze(csv_path: Path, output_path: Path) -> None:
     spec_mask = spec_freqs <= 60.0
     spec_db = 10 * np.log10(spec_power[spec_mask] + 1e-12)
 
-    mesh = ax3.pcolormesh(spec_times, spec_freqs[spec_mask], spec_db, shading="gouraud", cmap="viridis")
-    ax3.set_title("Filtered Spectrogram")
-    ax3.set_xlabel("Time (Seconds)")
-    ax3.set_ylabel("Frequency (Hz)")
-    fig.colorbar(mesh, ax=ax3, label="Power (dB)")
+    mesh = ax_spec.pcolormesh(spec_times, spec_freqs[spec_mask], spec_db, shading="gouraud", cmap="viridis")
+    ax_spec.set_title(f"{label} -- Filtered Spectrogram")
+    ax_spec.set_xlabel("Time (Seconds)")
+    ax_spec.set_ylabel("Frequency (Hz)")
+    fig.colorbar(mesh, ax=ax_spec, label="Power (dB)")
+
+
+def analyze(csv_path: Path, output_path: Path) -> None:
+    elapsed_s, ch1_raw, ch2_raw = load_csv(csv_path)
+    fs = estimate_fs(elapsed_s)
+    print(f"Loaded {len(ch1_raw)} samples from {csv_path}, estimated fs = {fs:.2f} Hz")
+
+    ch1_filtered = filter_signal(ch1_raw, fs)
+    ch2_filtered = filter_signal(ch2_raw, fs)
+
+    fig, axes = plt.subplots(3, 2, figsize=(18, 10))
+    fig.canvas.manager.set_window_title("EEG Post-Collection Analysis (2 Channels)")
+
+    plot_channel(fig, axes[:, 0], elapsed_s, ch1_filtered, fs, CHANNEL_LABELS[0])
+    plot_channel(fig, axes[:, 1], elapsed_s, ch2_filtered, fs, CHANNEL_LABELS[1])
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -123,7 +142,7 @@ def analyze(csv_path: Path, output_path: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Replay a recorder.py CSV and analyze it")
+    parser = argparse.ArgumentParser(description="Replay a recorder.py CSV and analyze both channels")
     parser.add_argument("--csv", type=Path, required=True, help="CSV file written by recorder.py")
     parser.add_argument("--output", type=Path, default=None,
                          help="Path to save the analysis plot PNG (default: <csv name>.png)")
