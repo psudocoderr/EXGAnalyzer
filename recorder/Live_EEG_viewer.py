@@ -8,43 +8,63 @@ from collections import deque
 from scipy.signal import butter, filtfilt
 
 # --- Hardware & DSP Configuration ---
-COM_PORT = '/dev/ttyUSB0'        # Change to your ESP32 COM port
+COM_PORT = '/dev/ttyACM0'        # Change to your ESP32 COM port
 BAUD_RATE = 115200
-FS = 245.0               # Estimated sampling rate from your previous data
-WINDOW_SEC = 2.0         # 2 seconds of rolling history for the FFT window
-MAX_SAMPLES = int(FS * WINDOW_SEC)
+NOMINAL_FS = 250.0       # Only used to size the buffer -- actual fs is measured from arrival timestamps,
+                         # since the firmware's delayMicroseconds(4000) loop doesn't guarantee exactly 250 Hz.
+WINDOW_SEC = 5.0         # Rolling history window for the raw/FFT view
+MAX_SAMPLES = int(NOMINAL_FS * WINDOW_SEC)
 
 # --- Initialize Global Ring Buffers ---
-# deques automatically push old data out when MAX_SAMPLES is reached
+# deques automatically push old data out when MAX_SAMPLES is reached.
+# Each entry is (arrival_timestamp, raw_adc_value) so the real sampling
+# rate can be measured instead of assumed.
 raw_buffer = deque(maxlen=MAX_SAMPLES)
 
-# --- Aggressive Filter Design ---
-# 1. Bandstop (Reject 48-52 Hz completely to catch the drifting 49.1 Hz mains noise)
-b_notch, a_notch = butter(4, [48.0, 52.0], btype='bandstop', fs=FS)
-# 2. Bandpass (6th-order, raised to 2.0 Hz to aggressively kill Delta-band baseline wandering)
-b_bp, a_bp = butter(6, [2.0, 45.0], btype='bandpass', fs=FS)
+
+def estimate_fs(timestamps: np.ndarray) -> float:
+    """Measure the real sampling rate from sample arrival timestamps."""
+    duration = timestamps[-1] - timestamps[0]
+    if duration <= 0:
+        return NOMINAL_FS
+    return (len(timestamps) - 1) / duration
 
 def serial_worker():
-    """Background thread to read serial data continuously without blocking the UI."""
+    """Read and print values exactly as sent by the nRF52840."""
     try:
-        ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
+        ser = serial.Serial(
+            COM_PORT,
+            BAUD_RATE,
+            timeout=1
+        )
         print(f"Connected to {COM_PORT}. Acquiring data...")
-    except serial.SerialException:
-        print(f"Failed to connect to {COM_PORT}. Is the Serial Monitor closed?")
+
+    except serial.SerialException as e:
+        print(f"Failed to connect to {COM_PORT}: {e}")
         return
 
     while True:
         try:
-            line = ser.readline().decode('utf-8', errors='ignore').strip()
-            if "CH0:" in line:
-                # Print to terminal exactly as requested
-                print(line)
-                
-                # Parse value and add to ring buffer
-                val_str = line.split("CH0:")[1].split(",")[0]
-                raw_buffer.append(int(val_str))
-        except Exception:
-            pass
+            line = ser.readline().decode(
+                "utf-8",
+                errors="ignore"
+            ).strip()
+
+            if not line:
+                continue
+
+            # Print exactly what the nRF sent
+            print(line)
+
+            # Store the numeric value with its arrival time
+            raw_buffer.append((time.time(), float(line)))
+
+        except ValueError:
+            # Ignore anything that isn't a number
+            print(f"Ignoring invalid data: {line}")
+
+        except Exception as e:
+            print(f"Serial error: {e}")
 
 # --- Start Background Thread ---
 thread = threading.Thread(target=serial_worker, daemon=True)
@@ -86,31 +106,40 @@ def update(frame):
     """Called every 150ms by FuncAnimation to update the graphs."""
     if len(raw_buffer) < MAX_SAMPLES:
         return line_raw, line_fft
-    
-    # 1. Convert to Volts and remove DC offset
-    raw_arr = np.array(raw_buffer)
+
+    # 1. Split buffer into timestamps/values, measure the real fs
+    buffered = list(raw_buffer)
+    timestamps = np.array([t for t, _ in buffered])
+    raw_arr = np.array([v for _, v in buffered])
+    fs = estimate_fs(timestamps)
+
+    # 2. Convert to Volts and remove DC offset
     volts = (raw_arr / 4095.0) * 3.3
     volts_centered = volts - np.mean(volts)
-    
-    # 2. Apply Filters (Bandstop -> Bandpass)
+
+    # 3. Apply Filters (Bandstop -> Bandpass), designed against the
+    #    actually measured fs rather than an assumed nominal rate
+    b_notch, a_notch = butter(4, [48.0, 52.0], btype='bandstop', fs=fs)
+    b_bp, a_bp = butter(6, [2.0, 45.0], btype='bandpass', fs=fs)
     filtered = filtfilt(b_notch, a_notch, volts_centered)
     filtered = filtfilt(b_bp, a_bp, filtered)
-    
-    # 3. Compute FFT
+
+    # 4. Compute FFT
     n = len(filtered)
     fft_mag = np.abs(np.fft.rfft(filtered)) / n
-    freqs = np.fft.rfftfreq(n, d=1.0/FS)
-    
-    # 4. Update Plot Data
-    time_axis = np.linspace(0, WINDOW_SEC, len(volts_centered))
+    freqs = np.fft.rfftfreq(n, d=1.0/fs)
+
+    # 5. Update Plot Data
+    time_axis = timestamps - timestamps[0]
     line_raw.set_data(time_axis, volts_centered)
     line_fft.set_data(freqs, fft_mag)
-    
-    # Dynamically scale Y-axes to accommodate signal spikes
+
+    # Dynamically scale axes to accommodate signal spikes and fs drift
+    ax1.set_xlim(time_axis[0], time_axis[-1])
     ax1.set_ylim(np.min(volts_centered)*1.2, np.max(volts_centered)*1.2)
     max_fft = np.max(fft_mag[(freqs >= 2.0) & (freqs <= 45.0)]) if len(freqs) > 0 else 0.001
     ax2.set_ylim(0, max(0.001, max_fft * 1.2))
-    
+
     return line_raw, line_fft
 
 # Run the animation loop at ~6.6 FPS (150ms)
