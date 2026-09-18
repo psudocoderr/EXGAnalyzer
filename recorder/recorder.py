@@ -65,12 +65,12 @@ def record(port: str, baud: int, duration_s: float, csv_path: Path) -> None:
     print(f"Analyze it with:\n  python analyzer.py --csv {csv_path}")
 
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "v7"
+DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "v7.5"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Record the EEG serial stream to a CSV for later analysis")
-    parser.add_argument("--port", default="/dev/ttyACM0", help="Serial port, e.g. /dev/ttyACM0")
+    parser.add_argument("--port", default="/dev/ttyUSB0", help="Serial port, e.g. /dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--duration", type=float, default=120.0, help="Seconds to record")
     parser.add_argument("--csv", type=Path, default=None,

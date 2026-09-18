@@ -11,7 +11,7 @@ from scipy.signal import butter, filtfilt, spectrogram
 # Hardware & DSP Configuration
 # ============================================================
 
-COM_PORT = '/dev/ttyACM0'
+COM_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 115200
 
 # Only used to size buffers up front -- the firmware's delayMicroseconds(4000)

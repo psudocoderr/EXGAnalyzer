@@ -8,7 +8,7 @@ from collections import deque
 from scipy.signal import butter, filtfilt
 
 # --- Hardware & DSP Configuration ---
-COM_PORT = '/dev/ttyACM0'        # Change to your ESP32 COM port
+COM_PORT = '/dev/ttyUSB0'        # Change to your ESP32 COM port
 BAUD_RATE = 115200
 NOMINAL_FS = 250.0       # Only used to size the buffer -- actual fs is measured from arrival timestamps,
                          # since the firmware's delayMicroseconds(4000) loop doesn't guarantee exactly 250 Hz.
