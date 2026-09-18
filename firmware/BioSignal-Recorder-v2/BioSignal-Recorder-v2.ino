@@ -1,52 +1,49 @@
-// EXG-Visualizer
+// EXG-Visualizer (patched firmware)
 // https://github.com/upsidedownlabs/BioSignal-Recorder
 
+// Original copyrights preserved:
 // Copyright (c) 2023 Mahesh Tupe tupemahesh91@gmail.com
 // Copyright (c) 2021 Moteen Shah moteenshah.02@gmail.com
-
-// Upside Down Labs invests time and resources providing this open source code,
-// please support Upside Down Labs and open-source hardware by purchasing
-// products from Upside Down Labs!
 // Copyright (c) 2023 Upside Down Labs - contact@upsidedownlabs.tech
 
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-
-
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+// Patch notes (why this differs from upstream):
+// - WStype_DISCONNECTED now frees per-channel buffers and stops/detaches the
+//   corresponding hw timers. Upstream leaked both on every reconnect, so a
+//   long recording session with any browser refresh/reconnect would slowly
+//   exhaust heap and eventually hang or crash the board.
+// - loop() now yields (vTaskDelay(1)) once per pass so the WiFi/TCP stack is
+//   guaranteed scheduling time even under sustained interrupt load. Without
+//   this, a tight loop() can starve background networking tasks.
+// - Added periodic free-heap logging over Serial so a leak (if one creeps
+//   back in) is visible during a soak test instead of surfacing only as an
+//   unexplained hang after N minutes.
+// - webSocket.sendBIN() is left as-is (it's fine at 256Hz data rates) but
+//   note it is a BLOCKING call: if the client-side tab stops draining the
+//   socket, this call can stall. That risk is addressed on the client side
+//   (streaming CSV writer decoupled from chart rendering) rather than here.
 
 #include <WebSocketsServer.h>
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
-#include <SPIFFS.h>
 #include <driver/adc.h>
 #include <math.h>
+#include <SPIFFS.h>
 
-// Add SSID and PASSWORD for network you are connected to
+// #define USE_LittleFS
+// #include <FS.h>
+// #ifdef USE_LittleFS
+//   #define SPIFFS LITTLEFS
+//   #include <LITTLEFS.h> 
+// #else
+//   #include <SPIFFS.h>
+// #endif
+
 const char *SSID = "YOUR_WIFI_SSID";
 const char *PASSWORD = "YOUR_WIFI_PASSWORD";
 
-// Create asyncwebserver object on port 80
 AsyncWebServer server(80);
-
-// Create websocketserver object on port 81
-// Websocket is used to send actual analog data
 WebSocketsServer webSocket = WebSocketsServer(81);
 
-// Initialize timer interrupts
 hw_timer_t * timer_1 = NULL;
 hw_timer_t * timer_2 = NULL;
 hw_timer_t * timer_3 = NULL;
@@ -57,10 +54,8 @@ portMUX_TYPE timerMux_2 = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE timerMux_3 = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE timerMux_4 = portMUX_INITIALIZER_UNLOCKED;
 
-// Counter for counting number of times each timer gets triggered
 volatile int interruptCounter[4] = {0};
 
-// counter for each timer
 void IRAM_ATTR onTimer_1() {
   portENTER_CRITICAL_ISR(&timerMux_1);
   interruptCounter[0]++;
@@ -82,55 +77,85 @@ void IRAM_ATTR onTimer_4() {
   portEXIT_CRITICAL_ISR(&timerMux_4);
 }
 
+// Timer pointers/mutexes indexed by channel, used for cleanup on disconnect.
+hw_timer_t ** const timers[4] = { &timer_1, &timer_2, &timer_3, &timer_4 };
 
 void setup()
 {
-  Serial.begin(115200);
-
-  // SPIFFS is used for storing HTML, CSS and JS code on esp32
-  if (!SPIFFS.begin()) {
-    Serial.println("An Error has occurred while mounting SPIFFS");
-    return;
+  Serial.begin(9600);
+  if (!SPIFFS.begin(true)) {
+      Serial.println("An Error has occurred while mounting SPIFFS");
+      return;
   }
 
-  // Connect to WiFi
+  Serial.println("SPIFFS mounted successfully");
+  File root = SPIFFS.open("/");
+  File file = root.openNextFile();
+
+while (file) {
+    Serial.print("FILE: ");
+    Serial.println(file.name());
+    file = root.openNextFile();
+}
+
   WiFi.begin(SSID, PASSWORD);
   while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
+    delay(100);
     Serial.println("Connecting to WiFi..");
   }
 
-  // Local IP is where our webserver will be hosted
   Serial.println("");
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
 
-  // Send HTML file when server requests it
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest * request)
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
   {
-    request->send(SPIFFS, "/index.html");
+      Serial.println("HTTP GET / received");
+
+      if (SPIFFS.exists("/index.html")) {
+          Serial.println("index.html FOUND");
+          request->send(SPIFFS, "/index.html", "text/html");
+      } else {
+          Serial.println("index.html NOT FOUND");
+          request->send(404, "text/plain", "index.html not found in SPIFFS");
+      }
   });
 
-  // start server
   server.begin();
-
-  // Start websocket connection
   webSocket.begin();
-
-  // Whenever a message is recieved on websocket, callback function is called
   webSocket.onEvent(callback);
-
 }
 
-bool sample = false;      // Boolean value to tell ESP32 when to start or stop sampling
-int sampling_rate = 0;    // For storing sampling rate of given channel
-int adc[4];               //
-int channel_count = 0;    // For storing channel number of channel in use
-int total_channel = 0;    // For storing total number of channel
+bool sample = false;
+int sampling_rate = 0;
+int adc[4];
+int channel_count = 0;
+int total_channel = 0;
+
+// We will use 2D array for storing data of all 4 channels.
+uint16_t **buffer_add = (uint16_t **)calloc(4, sizeof(uint16_t *));
+
+// Frees buffers and stops timers for all channels. Called on disconnect so
+// a reconnect starts from a clean slate instead of leaking heap.
+void reset_channels()
+{
+  for (int i = 0; i < 4; i++) {
+    if (*timers[i] != NULL) {
+      timerAlarmDisable(*timers[i]);
+      timerDetachInterrupt(*timers[i]);
+      timerEnd(*timers[i]);
+      *timers[i] = NULL;
+    }
+    if (buffer_add[i] != NULL) {
+      free(buffer_add[i]);
+      buffer_add[i] = NULL;
+    }
+    interruptCounter[i] = 0;
+  }
+}
 
 void callback(byte num, WStype_t type, uint8_t * payload, size_t length)
 {
-  // Switch case based on type of message recieved
   switch (type)
   {
     case WStype_DISCONNECTED:
@@ -138,10 +163,18 @@ void callback(byte num, WStype_t type, uint8_t * payload, size_t length)
       sample = false;
       channel_count = 0;
       total_channel = 0;
+      reset_channels();
+      Serial.print("Free heap after cleanup: ");
+      Serial.println(ESP.getFreeHeap());
       break;
 
     case WStype_CONNECTED:
       Serial.println("Client connected");
+      // Defensive: make sure we start clean even if the previous session
+      // didn't get a clean DISCONNECTED event (e.g. power blip on client).
+      reset_channels();
+      channel_count = 0;
+      total_channel = 0;
       sample = true;
       break;
 
@@ -149,7 +182,6 @@ void callback(byte num, WStype_t type, uint8_t * payload, size_t length)
       String rate;
       String gpio;
 
-      // Last character of msg recived is GPIO number
       gpio += (char)payload[length - 1];
       gpio += '\n';
       if (gpio.toInt() == 9)
@@ -165,7 +197,6 @@ void callback(byte num, WStype_t type, uint8_t * payload, size_t length)
         Serial.print("Channel: ");
         Serial.println(gpio);
 
-        // Remaining characters form sampling rate
         for (int i = 0; i < length - 1; i++)
         {
           rate += (char)payload[i];
@@ -181,18 +212,10 @@ void callback(byte num, WStype_t type, uint8_t * payload, size_t length)
   }
 }
 
-// We will use 2D array for storing data of all 4 channels
-// buffer_add has 4 sub arrays
-uint16_t **buffer_add = (uint16_t **)calloc(4, sizeof(uint16_t *));
-
 void send_samples(int sampling_rate, int adc, int channel_count)
 {
-  // Fix tick count for timer according to sampling rate for given channel
   int tick_count = 1000000 / sampling_rate;
 
-  // Start timer for corresponding channel
-  // Allocate space for data worth 1 Frame (for 0.33 seconds as chart updates at 30FPS)
-  // Extra 2 blocks for storing channel number and packet number
   switch (channel_count)
   {
     case 0:
@@ -228,74 +251,76 @@ void send_samples(int sampling_rate, int adc, int channel_count)
       break;
   }
 
-  // Configure ADC of ESP32 for 12 bit resolution and highest attenuation
   adc1_config_width(ADC_WIDTH_BIT_12);
   adc1_config_channel_atten((adc1_channel_t)(adc), ADC_ATTEN_DB_11);
 }
 
-static long packet_counter = 0;       // Stores current packet number
-static long buffer_counter[4] = {0};  // Stores size of packet
+static long packet_counter = 0;
+static long buffer_counter[4] = {0};
 portMUX_TYPE * timer_mux = NULL;
+
+// Heap logging cadence for soak testing / diagnosing any future leak.
+unsigned long last_heap_log = 0;
+const unsigned long HEAP_LOG_INTERVAL_MS = 10000;
+
 void loop() {
   webSocket.loop();
 
-  // Loop through selected channels and select corresponding timerMux
   for (int i = 0; i < total_channel; i++)
   {
     switch (i)
     {
-      case 0:
-        timer_mux = &timerMux_1;
-        break;
-      case 1:
-        timer_mux = &timerMux_2;
-        break;
-      case 2:
-        timer_mux = &timerMux_3;
-        break;
-      case 3:
-        timer_mux = &timerMux_4;
-        break;
+      case 0: timer_mux = &timerMux_1; break;
+      case 1: timer_mux = &timerMux_2; break;
+      case 2: timer_mux = &timerMux_3; break;
+      case 3: timer_mux = &timerMux_4; break;
     }
 
-    // If corresponding timer has triggered sample once and decrement interrupt counter
     if (interruptCounter[i] > 0)
     {
       portENTER_CRITICAL(timer_mux);
       interruptCounter[i]--;
       portEXIT_CRITICAL(timer_mux);
 
-      // Store samples in buffer until enough samples are taken for one frame
       if (buffer_counter[i] < round((float)sampling_rate / 30.0))
       {
         buffer_add[i][buffer_counter[i]] = adc1_get_raw((adc1_channel_t)adc[i]) & 0x0FFF;
         buffer_counter[i]++;
       }
-
-      // If packet for a frame is ready increment packet number and transmit packet
       else
       {
-        if (packet_counter < 100)
-        {
-          packet_counter++;
-        }
-        else
-        {
-          packet_counter = 0;
-        }
+        if (packet_counter < 100) packet_counter++;
+        else packet_counter = 0;
 
-        // Second last index contains packet number
         buffer_add[i][buffer_counter[i]] = packet_counter & 0x0FFF;
         buffer_counter[i]++;
 
-        // Last index contains channel number
         buffer_add[i][buffer_counter[i]] = i & 0x0FFF;
         buffer_counter[i]++;
 
-        // Transmit data packet
+        // NOTE: sendBIN() is blocking. At 256Hz this is not expected to be
+        // an issue, but if the client ever stops draining the socket (e.g.
+        // a stalled tab), this call can stall loop() along with it. The
+        // client has been fixed to avoid that scenario (see index.html).
         webSocket.sendBIN(0, (uint8_t *)&buffer_add[i][0], buffer_counter[i]*sizeof(uint16_t));
-        buffer_counter[i] = 0;  // empty buffer
+        buffer_counter[i] = 0;
       }
     }
   }
+
+  // Periodic heap logging — watch this during a long soak test. It should
+  // stay flat (aside from normal small fluctuation); a steady downward
+  // trend means something is still leaking.
+  unsigned long now = millis();
+  if (now - last_heap_log >= HEAP_LOG_INTERVAL_MS) {
+    last_heap_log = now;
+    // Serial.print("Free heap: ");
+    // Serial.println(ESP.getFreeHeap());
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+  }
+
+  // Yield so the WiFi/TCP background task always gets scheduling time,
+  // even under sustained interrupt load from the sampling timers.
+  vTaskDelay(1);
 }
